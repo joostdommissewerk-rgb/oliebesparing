@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Terugverdientijd filtersysteem</title>
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --text: #1a1a1a;
+    --muted: #6b7280;
+    --line: #e5e7eb;
+    --accent: #2e6fd8;
+    --pink: #e91e8c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: #ffffff;
+    color: var(--text);
+    font-family: Roboto, Arial, sans-serif;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 28px 16px 40px; }
+  h1 { font-size: 24px; font-weight: 700; margin: 0 0 4px; }
+  .formula { color: var(--muted); font-size: 14px; margin: 0 0 24px; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 12px 16px;
+    margin-bottom: 20px;
+  }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .grid > div { display: flex; flex-direction: column; justify-content: flex-end; }
+  input:not([type=range]) {
+    width: 100%;
+    font: 500 16px Roboto, Arial, sans-serif;
+    padding: 8px 10px;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    color: var(--text);
+  }
+  input:not([type=range]):focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: transparent; }
+  input[type=range] { width: 100%; margin: 8px 0 0; accent-color: var(--accent); cursor: pointer; }
+  .results {
+    display: flex; flex-wrap: wrap; gap: 8px 28px;
+    font-size: 14px; margin-bottom: 16px;
+  }
+  .results b { font-weight: 700; }
+  .results .be b { color: var(--pink); }
+  .chartbox { position: relative; width: 100%; }
+  canvas { display: block; width: 100%; }
+  .bar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 12px; flex-wrap: wrap; }
+  .hint { font-size: 12px; color: var(--muted); }
+  button {
+    font: 500 14px Roboto, Arial, sans-serif;
+    background: var(--accent); color: #fff;
+    border: 0; border-radius: 6px; padding: 9px 16px; cursor: pointer;
+  }
+  button:hover { filter: brightness(1.08); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Terugverdientijd filtersysteem</h1>
+  <p class="formula">Y = C / ( V × p × (D / T) × X / (1 + X) )</p>
+
+  <div class="grid">
+    <div><label for="C">C · kosten filtersysteem (€)</label><input id="C" inputmode="decimal" value="5000"></div>
+    <div><label for="V">V · volume pan (L)</label><input id="V" inputmode="decimal" value="31"></div>
+    <div><label for="P">p · literprijs olie (€/L)</label><input id="P" inputmode="decimal" value="3,00"></div>
+    <div><label for="D">D · frituurdagen per jaar</label><input id="D" inputmode="decimal" value="360"></div>
+    <div><label for="T">T · levensduur olie nu (dagen)</label><input id="T" inputmode="decimal" value="4,5"></div>
+    <div><label for="L">Levensduur bakwand (jaar)</label><input id="L" inputmode="decimal" value="5"></div>
+  </div>
+
+  <div class="results" id="results"></div>
+
+  <div class="chartbox"><canvas id="chart"></canvas></div>
+
+  <div class="bar">
+    <span class="hint">Beweeg over de grafiek om waardes af te lezen.</span>
+    <button id="export">Exporteer als PNG (transparant)</button>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const ids = ['C','V','P','D','T','L'];
+const num = v => {
+  let t = String(v).trim().replace(/[€%\s]/g, '');
+  if (t.includes(',')) t = t.replace(/\./g, '').replace(',', '.');
+  else if (/^\d{1,3}(\.\d{3})+$/.test(t)) t = t.replace(/\./g, '');
+  const n = parseFloat(t);
+  return isFinite(n) ? n : NaN;
+};
+const fmt = (n, d = 0) => n.toLocaleString('nl-NL', { minimumFractionDigits: d, maximumFractionDigits: d });
+
+function params() {
+  const p = {};
+  ids.forEach(k => p[k] = num($(k).value));
+  p.XM = 100;
+  p.YM = isFinite(p.L) ? Math.max(15, Math.ceil(p.L * 1.5 / 5) * 5) : 15;
+  return p;
+}
+
+// annual saving at full saving fraction: A = V * p * D / T
+function model(p) {
+  const A = p.V * p.P * p.D / p.T;
+  const Y = x => p.C * (1 + x) / (A * x);
+  const denom = p.L * A - p.C;
+  const xBE = denom > 0 ? p.C / denom : null;
+  return { A, Y, xBE };
+}
+
+function niceStep(range, target) {
+  const raw = range / target;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const r = raw / mag;
+  return (r <= 1 ? 1 : r <= 2 ? 2 : r <= 2.5 ? 2.5 : r <= 5 ? 5 : 10) * mag;
+}
+
+function draw(ctx, W, H, s, hoverX) {
+  const p = params();
+  ctx.clearRect(0, 0, W, H);
+  if (![p.C,p.V,p.P,p.D,p.T,p.L,p.XM,p.YM].every(v => isFinite(v) && v > 0)) {
+    ctx.fillStyle = '#6b7280';
+    ctx.font = `${14*s}px Roboto, Arial`;
+    ctx.fillText('Vul geldige, positieve waardes in.', 20*s, 30*s);
+    return null;
+  }
+  const m = model(p);
+  const xMax = p.XM / 100, yMax = p.YM;
+  const pad = { l: 64*s, r: 24*s, t: 20*s, b: 58*s };
+  const pw = W - pad.l - pad.r, ph = H - pad.t - pad.b;
+  const sx = x => pad.l + (x / xMax) * pw;
+  const sy = y => pad.t + ph - (y / yMax) * ph;
+
+  const font = (sz, w = 400) => `${w} ${sz*s}px Roboto, Arial, sans-serif`;
+
+  // grid + y ticks
+  const yStep = niceStep(yMax, 6);
+  ctx.lineWidth = 1*s;
+  ctx.font = font(12);
+  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  for (let y = 0; y <= yMax + 1e-9; y += yStep) {
+    ctx.strokeStyle = y === 0 ? '#9ca3af' : '#e5e7eb';
+    ctx.beginPath(); ctx.moveTo(pad.l, sy(y)); ctx.lineTo(pad.l + pw, sy(y)); ctx.stroke();
+    ctx.fillStyle = '#4b5563';
+    ctx.fillText(fmt(y, Number.isInteger(yStep) ? 0 : (Number.isInteger(yStep*10) ? 1 : 2)), pad.l - 10*s, sy(y));
+  }
+  // x ticks + vertical grid
+  const xStepPct = niceStep(p.XM, 10);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  for (let xp = 0; xp <= p.XM + 1e-9; xp += xStepPct) {
+    const X = sx(xp / 100);
+    ctx.strokeStyle = xp === 0 ? '#9ca3af' : '#e5e7eb';
+    ctx.beginPath(); ctx.moveTo(X, pad.t); ctx.lineTo(X, pad.t + ph); ctx.stroke();
+    ctx.strokeStyle = '#9ca3af';
+    ctx.beginPath(); ctx.moveTo(X, pad.t + ph); ctx.lineTo(X, pad.t + ph + 5*s); ctx.stroke();
+    ctx.fillStyle = '#4b5563';
+    ctx.fillText(fmt(xp, Number.isInteger(xStepPct) ? 0 : 1) + '%', X, pad.t + ph + 9*s);
+  }
+
+  // axis titles
+  ctx.fillStyle = '#1a1a1a';
+  ctx.font = font(13, 500);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+  ctx.fillText('Verlenging levensduur olie (X)', pad.l + pw / 2, H - 4*s);
+  ctx.save();
+  ctx.translate(16*s, pad.t + ph / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.textBaseline = 'middle';
+  ctx.fillText('Terugverdientijd (jaar)', 0, 0);
+  ctx.restore();
+
+  // clip to plot area
+  ctx.save();
+  ctx.beginPath(); ctx.rect(pad.l, pad.t, pw, ph); ctx.clip();
+
+  // lifetime reference line
+  if (p.L <= yMax) {
+    ctx.strokeStyle = '#9ca3af';
+    ctx.setLineDash([6*s, 5*s]);
+    ctx.lineWidth = 1.5*s;
+    ctx.beginPath(); ctx.moveTo(pad.l, sy(p.L)); ctx.lineTo(pad.l + pw, sy(p.L)); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#6b7280';
+    ctx.font = font(12);
+    ctx.textAlign = 'right'; ctx.textBaseline = 'bottom';
+    ctx.fillText(`Levensduur bakwand (${fmt(p.L, p.L % 1 ? 1 : 0)} jaar)`, pad.l + pw - 4*s, sy(p.L) - 5*s);
+  }
+
+  // curve
+  ctx.strokeStyle = '#2e6fd8';
+  ctx.lineWidth = 3*s;
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  ctx.beginPath();
+  const N = 600;
+  let started = false;
+  for (let i = 1; i <= N; i++) {
+    const x = xMax * i / N;
+    const y = Math.min(m.Y(x), yMax * 3);
+    if (!started) { ctx.moveTo(sx(x), sy(y)); started = true; } else ctx.lineTo(sx(x), sy(y));
+  }
+  ctx.stroke();
+
+  // break-even marker
+  if (m.xBE !== null && m.xBE <= xMax && p.L <= yMax) {
+    const bx = sx(m.xBE), by = sy(p.L);
+    ctx.strokeStyle = '#e91e8c';
+    ctx.lineWidth = 1.5*s;
+    ctx.setLineDash([4*s, 4*s]);
+    ctx.beginPath(); ctx.moveTo(bx, by); ctx.lineTo(bx, pad.t + ph); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#e91e8c';
+    ctx.beginPath(); ctx.arc(bx, by, 5.5*s, 0, Math.PI * 2); ctx.fill();
+    ctx.font = font(13, 700);
+    ctx.textAlign = 'left'; ctx.textBaseline = 'bottom';
+    ctx.fillText(`Break-even: ${fmt(m.xBE * 100, 1)}%`, bx + 9*s, by - 8*s);
+  }
+  ctx.restore();
+
+  // hover readout (screen only)
+  if (hoverX !== undefined && hoverX !== null) {
+    const x = (hoverX - pad.l) / pw * xMax;
+    if (x > 0 && x <= xMax) {
+      const y = m.Y(x);
+      const X = sx(x), Ypx = sy(Math.min(y, yMax));
+      ctx.strokeStyle = 'rgba(46,111,216,0.35)';
+      ctx.lineWidth = 1*s;
+      ctx.beginPath(); ctx.moveTo(X, pad.t); ctx.lineTo(X, pad.t + ph); ctx.stroke();
+      if (y <= yMax) {
+        ctx.fillStyle = '#2e6fd8';
+        ctx.beginPath(); ctx.arc(X, Ypx, 4.5*s, 0, Math.PI * 2); ctx.fill();
+      }
+      const txt = `X = ${fmt(x * 100, 1)}%   Y = ${fmt(y, 2)} jaar`;
+      ctx.font = font(13, 500);
+      const tw = ctx.measureText(txt).width + 16*s;
+      let bx = X + 10*s; if (bx + tw > pad.l + pw) bx = X - 10*s - tw;
+      const byy = pad.t + 8*s;
+      ctx.fillStyle = 'rgba(255,255,255,0.95)';
+      ctx.strokeStyle = '#d1d5db';
+      ctx.beginPath(); ctx.roundRect(bx, byy, tw, 26*s, 5*s); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#1a1a1a';
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText(txt, bx + 8*s, byy + 13*s);
+    }
+  }
+  return m;
+}
+
+const canvas = $('chart');
+let hover = null;
+
+function render() {
+  const w = canvas.parentElement.clientWidth;
+  const h = Math.max(300, Math.round(w * 0.5));
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.round(w * dpr);
+  canvas.height = Math.round(h * dpr);
+  canvas.style.height = h + 'px';
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const m = draw(ctx, w, h, 1, hover);
+  updateResults(m);
+}
+
+function updateResults(m) {
+  const p = params();
+  const el = $('results');
+  if (!m) { el.innerHTML = ''; return; }
+  const perVulling = p.V * p.P;
+  const perJaar = p.D / p.T;
+  el.innerHTML =
+    `<span>Kosten per vulling: <b>€${fmt(perVulling, 2)}</b></span>` +
+    `<span>Vullingen per jaar: <b>${fmt(perJaar, 1)}</b></span>` +
+    `<span>Oliekosten per jaar: <b>€${fmt(m.A, 0)}</b></span>` +
+    `<span class="be">Break-even binnen ${fmt(p.L, p.L % 1 ? 1 : 0)} jaar vanaf: <b>${m.xBE === null ? 'nooit' : fmt(m.xBE * 100, 1) + '%'}</b></span>`;
+}
+
+// sliders: [min, max, step, decimals]
+const ranges = {
+  C:  [0, 20000, 100, 0],
+  V:  [5, 60, 1, 0],
+  P:  [1, 6, 0.05, 2],
+  D:  [200, 365, 1, 0],
+  T:  [1, 14, 0.5, 1],
+  L:  [1, 15, 0.5, 1],
+};
+ids.forEach(k => {
+  const txt = $(k);
+  const [mn, mx, st, dec] = ranges[k];
+  const r = document.createElement('input');
+  r.type = 'range'; r.min = mn; r.max = mx; r.step = st;
+  r.setAttribute('aria-label', txt.previousElementSibling.textContent);
+  const v0 = num(txt.value); if (isFinite(v0)) r.value = v0;
+  txt.after(r);
+  r.addEventListener('input', () => {
+    const v = parseFloat(r.value);
+    txt.value = v.toLocaleString('nl-NL', { minimumFractionDigits: dec, maximumFractionDigits: dec, useGrouping: false });
+    render();
+  });
+  txt.addEventListener('input', () => {
+    const v = num(txt.value);
+    if (isFinite(v)) r.value = Math.min(mx, Math.max(mn, v));
+    render();
+  });
+});
+window.addEventListener('resize', render);
+canvas.addEventListener('mousemove', e => { hover = e.offsetX; render(); });
+canvas.addEventListener('mouseleave', () => { hover = null; render(); });
+
+$('export').addEventListener('click', () => {
+  const W = 1600, H = 800, s = 2;
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  draw(c.getContext('2d'), W, H, s, null);
+  const a = document.createElement('a');
+  a.download = 'terugverdientijd_filtersysteem.png';
+  a.href = c.toDataURL('image/png');
+  document.body.appendChild(a); a.click(); a.remove();
+});
+
+(document.fonts && document.fonts.ready ? document.fonts.ready : Promise.resolve()).then(() => {
+  document.fonts.load('400 13px Roboto'); document.fonts.load('700 13px Roboto');
+  render();
+  setTimeout(render, 300);
+});
+render();
+</script>
+</body>
+</html>
